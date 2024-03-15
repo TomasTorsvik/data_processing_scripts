@@ -968,7 +968,7 @@ get_xxhsum_filename() {
             ## Just take the name of the directory
             fname="$(basename ${cdir})"
         fi
-        echo "${fname}_${JOBLID}.xxhsum"
+        echo "${cdir}/${fname}_${JOBLID}.xxhsum"
     else
         ERRMSG="get_xxhsum_filename: Invalid filename or directory input, '${1}'"
         log "${ERRMSG}"

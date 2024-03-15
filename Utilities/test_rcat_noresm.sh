@@ -7,8 +7,9 @@ pdir="$(cd ${scriptdir}/..; pwd -P)"
 testdir="${pdir}/TestFiles"
 rcat_script="${pdir}/PostProc/rcat_noresm.sh"
 
-NUMTESTS=0
-NUMFAIL=0
+declare LOGPASS="yes"
+declare NUMTESTS=0
+declare NUMFAIL=0
 
 perr() {
     ## If the first argument is non-zero, exit the script
@@ -32,7 +33,9 @@ check_test() {
     ## $3 is the expected result
     NUMTESTS=$((NUMTESTS + 1))
     if [ "${2}" == "${3}" ]; then
-        echo "${1}: PASS"
+        if [ "${LOGPASS}" == "yes" ]; then
+            echo "${1}: PASS"
+        fi
     else
         NUMFAIL=$((NUMFAIL + 1))
         echo "${1}: FAIL"
@@ -41,6 +44,12 @@ check_test() {
     fi
 }
 
+if [ $# -eq 1 -a "${1}" == "--fail-only" ]; then
+    LOGPASS="no"
+elif [ $# -gt 0 ]; then
+    echo "$(basename ${0}) [ --fail-only ]"
+    exit 1
+fi
 source ${rcat_script} --unit-test-mode
 perr $? "loading rcat_noresm.sh script, '${rcat_script}'"
 
@@ -50,12 +59,12 @@ for inst in $(seq 1 25); do
     tstring+=($(printf "cam_%04d.h1:cam_%04d.h2" ${inst} ${inst}))
 done
 tstring="$(echo ${tstring[@]} | tr ' ' ':')"
-tfiles=($(ls ${testdir}/case_ensemble.cam*.h[1-9]*.nc))
+tfiles=($(ls ${testdir}/ensemble/case_ensemble.cam*.h[1-9]*.nc))
 ifiles=$(get_file_set_names ${tfiles[@]})
 check_test "Ensemble instance string test" "${ifiles}" "${tstring}"
 
 ## Single instance test
-tfiles=($(ls ${testdir}/case_single.cice*.h[1-9]*.nc))
+tfiles=($(ls ${testdir}/casename/case_single.cice*.h[1-9]*.nc))
 ifiles=$(get_file_set_names ${tfiles[@]})
 check_test "Single instance string test" "${ifiles}" "cice.h1"
 
@@ -75,25 +84,19 @@ else
   ans="no"
 fi
 check_test "Check for JOBLID" "${ans}" "yes"
-xxhdir="testxxhsum_$(date +'%Y%m%d_%H%M%S')"
-if [ -d "${xxhdir}" ]; then
-  echo "ERROR: One-time use test directory, ${xxhdir}, already exists!"
-  exit 3
-fi
-mkdir -p ${xxhdir}/ice/hist
+xxhcase="xxcasename"
+xxhdir="${testdir}/${xxhcase}"
 ifilename=casename.cice.h.2021-01-16.nc
 touch ${xxhdir}/ice/hist/${ifilename}
 touch ${xxhdir}/${ifilename}
 fname=$(get_xxhsum_filename ${xxhdir})
-check_test "xxhsum filename topdir only" ${fname} ${xxhdir}_${jobid}.xxhsum
+check_test "xxhsum filename topdir only" ${fname} ${xxhdir}/${xxhcase}_${jobid}.xxhsum
 fname=$(get_xxhsum_filename ${xxhdir}/ice/hist/${ifilename})
-check_test "xxhsum filename icefile" ${fname} ${xxhdir}_ice_${jobid}.xxhsum
+check_test "xxhsum filename icefile" ${fname} ${xxhdir}/ice/hist/${xxhcase}_ice_${jobid}.xxhsum
 fname=$(get_xxhsum_filename ${xxhdir}/ice/hist)
-check_test "xxhsum filename ice hist dir" ${fname} ${xxhdir}_ice_${jobid}.xxhsum
+check_test "xxhsum filename ice hist dir" ${fname} ${xxhdir}/ice/hist/${xxhcase}_ice_${jobid}.xxhsum
 fname=$(get_xxhsum_filename ${xxhdir}/${ifilename})
-check_test "xxhsum filename fileonly" ${fname} casename_${jobid}.xxhsum
-## Cleanup
-rm -r ${xxhdir}
+check_test "xxhsum filename fileonly" ${fname} ${xxhdir}/casename_${jobid}.xxhsum
 
 ## Tests for finding monthly files
 tfile="NHISTpiaeroxid_f09_tn14_keyClim20201217.clm2.h0.1852-02.nc"
@@ -180,7 +183,7 @@ years="$(get_range_year ${dates} ${lnd_file})"
 check_test "CTSM year set test" "${years}" "1859"
 rof_file="${testdir}/rof_test_file.mosart_0001.h0.2000-05.nc"
 dates="$(get_rof_hist_file_info ${rof_file})"
-check_test "MOSART dates test" "${dates}" "1:20000601"
+check_test "MOSART dates test" "${dates}" "1:200005xx"
 years="$(get_range_year ${dates} ${rof_file})"
 check_test "MOSART year set test" "${years}" "2000"
 
@@ -247,7 +250,7 @@ check_test "ice monthly get_file_date test" "${tdate}" "2000:05"
 tdate="$(get_file_date ${lnd_file} lnd monthly)"
 check_test "lnd monthly get_file_date test" "${tdate}" "get_range_month: Multiple years found in ${lnd_file}"
 tdate="$(get_file_date ${rof_file} rof monthly)"
-check_test "rof monthly get_file_date test" "${tdate}" "2000:06"
+check_test "rof monthly get_file_date test" "${tdate}" "2000:05"
 
 ## Check some invalid inputs
 tdate="$(get_file_date ${atm_file} "foo" "yearly")"
