@@ -3,8 +3,9 @@
 ## Simple unit test for rcat_noresm.sh
 
 scriptdir="$(dirname $0)"
-testdir="$(cd ${scriptdir}/..; pwd -P)/Testing"
-rcat_script="${scriptdir}/rcat_noresm.sh"
+pdir="$(cd ${scriptdir}/..; pwd -P)"
+testdir="${pdir}/TestFiles"
+rcat_script="${pdir}/PostProc/rcat_noresm.sh"
 
 NUMTESTS=0
 NUMFAIL=0
@@ -65,6 +66,34 @@ bnds="$(bnds_from_array 2 4 6 8 10)"
 check_test "Strided bnds_from_array test" "${bnds}" "2,10"
 bnds="$(bnds_from_array 2 4 8 10)"
 check_test "Inconsistent bnds_from_array test" "${bnds}" "2,10"
+
+## Tests for finding the correct xxhsum filename
+jobid="${JOBLID}"
+if [ -n "${jobid}" ]; then
+  ans="yes"
+else
+  ans="no"
+fi
+check_test "Check for JOBLID" "${ans}" "yes"
+xxhdir="testxxhsum_$(date +'%Y%m%d_%H%M%S')"
+if [ -d "${xxhdir}" ]; then
+  echo "ERROR: One-time use test directory, ${xxhdir}, already exists!"
+  exit 3
+fi
+mkdir -p ${xxhdir}/ice/hist
+ifilename=casename.cice.h.2021-01-16.nc
+touch ${xxhdir}/ice/hist/${ifilename}
+touch ${xxhdir}/${ifilename}
+fname=$(get_xxhsum_filename ${xxhdir})
+check_test "xxhsum filename topdir only" ${fname} ${xxhdir}_${jobid}.xxhsum
+fname=$(get_xxhsum_filename ${xxhdir}/ice/hist/${ifilename})
+check_test "xxhsum filename icefile" ${fname} ${xxhdir}_ice_${jobid}.xxhsum
+fname=$(get_xxhsum_filename ${xxhdir}/ice/hist)
+check_test "xxhsum filename ice hist dir" ${fname} ${xxhdir}_ice_${jobid}.xxhsum
+fname=$(get_xxhsum_filename ${xxhdir}/${ifilename})
+check_test "xxhsum filename fileonly" ${fname} casename_${jobid}.xxhsum
+## Cleanup
+rm -r ${xxhdir}
 
 ## Tests for finding monthly files
 tfile="NHISTpiaeroxid_f09_tn14_keyClim20201217.clm2.h0.1852-02.nc"

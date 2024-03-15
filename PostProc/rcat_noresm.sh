@@ -2,21 +2,23 @@
 
 ### Tool to concatenate and compress NorESM day-files to month- or year-files
 ##
-## Currently able to handle output files from 'ice', 'atm', 'lnd', and 'rof' components.
+## Currently able to handle output files from 'atm', 'ice', 'lnd',
+##    'ocn', and 'rof' components.
 
 # Modified by Steve Goldhaber Met, 2023
-# Modified by Tyge Løvset NORCE, 2022
+# Original version from Tyge Løvset NORCE, last modification 2022
 # use on e.g.:
 # /projects/NS9560K/noresm/cases/N1850frc2_f09_tn14_20191113
 
 ## Update the script version here to indicate changes
 ## Use semantic versioning (https://semver.org/).
-VERSION="0.0.6"
+VERSION="0.0.7"
 
 # Store some pathnames, find tools needed by this script
 tool=$(basename $0)
-cprnc=$(dirname $(realpath $0))/cprnc
-xxhsum=$(dirname $(realpath $0))/xxhsum
+tooldir=$(dirname $(realpath $0))
+cprnc=${tooldir}/cprnc
+xxhsum=${tooldir}/xxhsum
 if [ ! -x "${cprnc}" ]; then
   xxhsum="/projects/NS9560K/local/bin/cprnc"
 fi
@@ -73,9 +75,12 @@ declare -A job_status=() # Status = created, in compress, compressed, in check, 
 declare -A error_reports=()
 ## Have a global logfile so that it can be used even in the case of an error exit
 declare logfilename
+## Use a single timestamp for the logfile and xxhsum files
+declare JOBLID
 
 help() {
-    echo "Tool to convert NorESM day-files to month- or year-files"
+    echo -e "${tool}, version ${VERSION}\n"
+    echo "Tool to compress and convert NorESM day-files to month- or year-files"
     echo "Usage:"
     echo "  ${tool} [OPTIONS] <archive case path> <output path>"
     echo "       --comp              component (default 'ice:cice')"
@@ -213,6 +218,7 @@ if [ "${UNITTESTMODE}" == "no" ]; then
     ulimit -s unlimited
 fi
 
+JOBLID=$(date +'%Y%m%d_%H%M%S')
 if [ "${UNITTESTMODE}" == "no" ]; then
     ## We have a bit of chicken and egg here.
     ## We can't log until we have a <logfilename> but
@@ -220,14 +226,13 @@ if [ "${UNITTESTMODE}" == "no" ]; then
     ## (possibly newly created) output directory.
     logmsgs=""
     ncrcat=$(which ncrcat)
-    lid=$(date +'%Y%m%d_%H%M%S')
     # The second positional argument is a location for output and logging
     if [ ! -d "${2}" ]; then
         logmsgs="Creating <output path>, '${2}'"
         mkdir -p ${2}
     fi
     outpath=$(realpath "${2}")
-    logfilename="${outpath}/${tool}.log.${lid}"
+    logfilename="${outpath}/${tool}.log.${JOBLID}"
 
     if [ -f "${logfilename}" ]; then
         rm -f ${logfilename}
@@ -934,6 +939,44 @@ get_file_date() {
     echo "${tdate}"
 }
 
+get_xxhsum_filename() {
+    ## Given a filename or directory ($1), return the name for the xxhsum filename
+    ## to use for compression jobs in that directory.
+    local cdir=""  # The name of the directory where $1 is located
+    local fname="" # The xxhsum filename
+    local pdir     # Parent directory name
+    if [ -f "${1}" ]; then
+        cdir="$(realpath $(dirname ${1}))"
+    elif [ -d "$(realpath ${1})" ]; then
+        cdir="$(realpath ${1})"
+    else
+        ERRMSG="get_xxhsum_filename: Invalid filename or directory input, '${1}'"
+        log "${ERRMSG}"
+        ERRCODE=${ERR_INTERNAL}
+        exit ${ERRCODE}
+    fi
+    if [ -n "${cdir}" ]; then
+        if [ "$(basename ${cdir})" == "hist" ]; then
+            ## We are in a component directory, grab the component name
+            ## and the casedir name (above component)
+            pdir="$(dirname ${cdir})" # e.g., ice, ocn
+            fname="$(basename $(dirname ${pdir}))_$(basename ${pdir})"
+        elif [ -f "${1}" ]; then
+            ## Take the case name from the filename
+            fname=$(echo $(basename "${1}") | cut -d'.' -f1)
+        else
+            ## Just take the name of the directory
+            fname="$(basename ${cdir})"
+        fi
+        echo "${fname}_${JOBLID}.xxhsum"
+    else
+        ERRMSG="get_xxhsum_filename: Invalid filename or directory input, '${1}'"
+        log "${ERRMSG}"
+        ERRCODE=${ERR_INTERNAL}
+        exit ${ERRCODE}
+    fi
+}
+
 compare_frames() {
     ## Compare the output file ($1) with some of the corresponding
     ## input files ($4-)
@@ -1121,21 +1164,20 @@ compare_frames() {
     log "${endmsg}${passmsg}"
 }
 
-convert_cmd()
-{
+convert_cmd() {
     ## Compress files ($4-) into a single file, $1.
     ## $3 is the model type (e.g., atm, lnd)
     ## $4 is a unique job number to allow thread-safe temporary filenames
     local outfile=${1}
     local comp=${2}
     local job_num=${3}
-    local reffile
     shift 3
     local files=($@)
     local nfil
     local numfiles="${#files[@]}"
     local reffile="${files[-1]}"
     local vmsg
+    local xxhsumfile
 
     if [ ${VERBOSE} -ge 1 ]; then
         vmsg="Concatenating ${#files[@]} to ${outfile} using level ${COMPRESS} compression"
@@ -1169,11 +1211,12 @@ convert_cmd()
     fail_report[${outfile}]=0
 
     if [ -f "${outfile}" ]; then
+        xxhsumfile=$(get_xxhsum_filename ${outfile})
         if [ "${DRYRUN}" == "yes" ]; then
-            log "${xxhsum} -H2 ${outfile} >> ${outfile}.xxhsum"
+            log "${xxhsum} -H2 ${outfile} >> ${xxhsumfile}"
         else
-            $(touch -r $reffile ${outfile})
-            ${xxhsum} -H2 ${outfile} >> ${outfile}.xxhsum
+            touch -r $reffile ${outfile}
+            ${xxhsum} -H2 ${outfile} >> ${xxhsumfile}
         fi
         if [ ${numfiles} -eq 1 ]; then
             nfil="file"
