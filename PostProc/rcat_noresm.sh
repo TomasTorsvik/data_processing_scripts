@@ -17,13 +17,20 @@ VERSION="0.0.7"
 # Store some pathnames, find tools needed by this script
 tool=$(basename $0)
 tooldir=$(dirname $(realpath $0))
+bindir="/projects/NS9560K/local/bin"
 cprnc=${tooldir}/cprnc
 xxhsum=${tooldir}/xxhsum
 if [ ! -x "${cprnc}" ]; then
-  xxhsum="/projects/NS9560K/local/bin/cprnc"
+    cprnc="${bindir}/cprnc"
+fi
+if [ ! -x "${cprnc}" ]; then
+    echo  "ERROR: No cprnc tool found, should be installed at ${bindir}"
 fi
 if [ ! -x "${xxhsum}" ]; then
-  xxhsum="/projects/NS9560K/local/bin/xxhsum"
+    xxhsum="${bindir}/xxhsum"
+fi
+if [ ! -x "${xxhsum}" ]; then
+    echo  "ERROR: No xxhsum tool found, should be installed at ${bindir}"
 fi
 
 ## Need to set the locale to be compatible with ncks output
