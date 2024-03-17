@@ -25,12 +25,14 @@ if [ ! -x "${cprnc}" ]; then
 fi
 if [ ! -x "${cprnc}" ]; then
     echo  "ERROR: No cprnc tool found, should be installed at ${bindir}"
+    exit 1
 fi
 if [ ! -x "${xxhsum}" ]; then
     xxhsum="${bindir}/xxhsum"
 fi
 if [ ! -x "${xxhsum}" ]; then
     echo  "ERROR: No xxhsum tool found, should be installed at ${bindir}"
+    exit 1
 fi
 
 ## Need to set the locale to be compatible with ncks output
@@ -1219,6 +1221,9 @@ convert_cmd() {
 
     if [ -f "${outfile}" ]; then
         xxhsumfile=$(get_xxhsum_filename ${outfile})
+        if [ -n "${ERRMSG}" ]; then
+            exit ${ERRCODE}
+        fi
         if [ "${DRYRUN}" == "yes" ]; then
             log "${xxhsum} -H2 ${outfile} >> ${xxhsumfile}"
         else
