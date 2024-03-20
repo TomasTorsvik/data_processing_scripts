@@ -91,12 +91,16 @@ touch ${xxhdir}/ice/hist/${ifilename}
 touch ${xxhdir}/${ifilename}
 fname=$(get_xxhsum_filename ${xxhdir})
 check_test "xxhsum filename topdir only" ${fname} ${xxhdir}/${xxhcase}_${jobid}.xxhsum
+rm -f ${fname}
 fname=$(get_xxhsum_filename ${xxhdir}/ice/hist/${ifilename})
 check_test "xxhsum filename icefile" ${fname} ${xxhdir}/ice/hist/${xxhcase}_ice_${jobid}.xxhsum
+rm -f ${fname}
 fname=$(get_xxhsum_filename ${xxhdir}/ice/hist)
 check_test "xxhsum filename ice hist dir" ${fname} ${xxhdir}/ice/hist/${xxhcase}_ice_${jobid}.xxhsum
+rm -f ${fname}
 fname=$(get_xxhsum_filename ${xxhdir}/${ifilename})
 check_test "xxhsum filename fileonly" ${fname} ${xxhdir}/casename_${jobid}.xxhsum
+rm -f ${fname}
 
 ## Tests for finding monthly files
 tfile="NHISTpiaeroxid_f09_tn14_keyClim20201217.clm2.h0.1852-02.nc"
@@ -150,6 +154,8 @@ dates="$(get_ice_hist_file_info ${ice_file})"
 check_test "CICE dates test" "${dates}" "${tstring}"
 years="$(get_range_year ${dates} ${ice_file})"
 check_test "CICE year set test" "${years}" "2000"
+year0="$(get_year0_from_time_attrib ${ice_file})"
+check_test "CICE year0 test" "${year0}" "0000"
 dates=(31 59 90 120 151 181 212 243 273 304 334 365)
 tvals=("00000131" "00000228" "00000331" "00000430" "00000531" "00000630" "00000731" "00000831" "00000930" "00001031" "00001130" "00001231")
 for ind in $(seq 0 $((${#dates[@]} - 1))); do
@@ -234,6 +240,7 @@ check_test "multi-year range month test" "${month}" "get_range_month: Multiple y
 atm_file="${testdir}/atm_test_file.cam_0001.h1.2000-06-13-00000.nc"
 tdate="$(get_file_date ${atm_file} atm yearly)"
 check_test "atm yearly get_file_date test" "${tdate}" "2000"
+ice_file="${testdir}/ice_test_file.cice_0001.h.2000-05.nc"
 tdate="$(get_file_date ${ice_file} ice yearly)"
 check_test "ice yearly get_file_date test" "${tdate}" "2000"
 lnd_file="${testdir}/lnd_test_file.clm2_0001.h1.2000-12-27-00000.nc"
