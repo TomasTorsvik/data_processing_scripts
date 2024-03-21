@@ -3,11 +3,13 @@
 ## Simple unit test for rcat_noresm.sh
 
 scriptdir="$(dirname $0)"
-testdir="$(cd ${scriptdir}/..; pwd -P)/Testing"
-rcat_script="${scriptdir}/rcat_noresm.sh"
+pdir="$(cd ${scriptdir}/..; pwd -P)"
+testdir="${pdir}/TestFiles"
+rcat_script="${pdir}/PostProc/rcat_noresm.sh"
 
-NUMTESTS=0
-NUMFAIL=0
+declare LOGPASS="yes"
+declare NUMTESTS=0
+declare NUMFAIL=0
 
 perr() {
     ## If the first argument is non-zero, exit the script
@@ -31,7 +33,9 @@ check_test() {
     ## $3 is the expected result
     NUMTESTS=$((NUMTESTS + 1))
     if [ "${2}" == "${3}" ]; then
-        echo "${1}: PASS"
+        if [ "${LOGPASS}" == "yes" ]; then
+            echo "${1}: PASS"
+        fi
     else
         NUMFAIL=$((NUMFAIL + 1))
         echo "${1}: FAIL"
@@ -40,6 +44,12 @@ check_test() {
     fi
 }
 
+if [ $# -eq 1 -a "${1}" == "--fail-only" ]; then
+    LOGPASS="no"
+elif [ $# -gt 0 ]; then
+    echo "$(basename ${0}) [ --fail-only ]"
+    exit 1
+fi
 source ${rcat_script} --unit-test-mode
 perr $? "loading rcat_noresm.sh script, '${rcat_script}'"
 
@@ -49,12 +59,12 @@ for inst in $(seq 1 25); do
     tstring+=($(printf "cam_%04d.h1:cam_%04d.h2" ${inst} ${inst}))
 done
 tstring="$(echo ${tstring[@]} | tr ' ' ':')"
-tfiles=($(ls ${testdir}/case_ensemble.cam*.h[1-9]*.nc))
+tfiles=($(ls ${testdir}/ensemble/case_ensemble.cam*.h[1-9]*.nc))
 ifiles=$(get_file_set_names ${tfiles[@]})
 check_test "Ensemble instance string test" "${ifiles}" "${tstring}"
 
 ## Single instance test
-tfiles=($(ls ${testdir}/case_single.cice*.h[1-9]*.nc))
+tfiles=($(ls ${testdir}/casename/case_single.cice*.h[1-9]*.nc))
 ifiles=$(get_file_set_names ${tfiles[@]})
 check_test "Single instance string test" "${ifiles}" "cice.h1"
 
@@ -65,6 +75,32 @@ bnds="$(bnds_from_array 2 4 6 8 10)"
 check_test "Strided bnds_from_array test" "${bnds}" "2,10"
 bnds="$(bnds_from_array 2 4 8 10)"
 check_test "Inconsistent bnds_from_array test" "${bnds}" "2,10"
+
+## Tests for finding the correct xxhsum filename
+jobid="${JOBLID}"
+if [ -n "${jobid}" ]; then
+  ans="yes"
+else
+  ans="no"
+fi
+check_test "Check for JOBLID" "${ans}" "yes"
+xxhcase="xxcasename"
+xxhdir="${testdir}/${xxhcase}"
+ifilename=casename.cice.h.2021-01-16.nc
+touch ${xxhdir}/ice/hist/${ifilename}
+touch ${xxhdir}/${ifilename}
+fname=$(get_xxhsum_filename ${xxhdir})
+check_test "xxhsum filename topdir only" ${fname} ${xxhdir}/${xxhcase}_${jobid}.xxhsum
+rm -f ${fname}
+fname=$(get_xxhsum_filename ${xxhdir}/ice/hist/${ifilename})
+check_test "xxhsum filename icefile" ${fname} ${xxhdir}/ice/hist/${xxhcase}_ice_${jobid}.xxhsum
+rm -f ${fname}
+fname=$(get_xxhsum_filename ${xxhdir}/ice/hist)
+check_test "xxhsum filename ice hist dir" ${fname} ${xxhdir}/ice/hist/${xxhcase}_ice_${jobid}.xxhsum
+rm -f ${fname}
+fname=$(get_xxhsum_filename ${xxhdir}/${ifilename})
+check_test "xxhsum filename fileonly" ${fname} ${xxhdir}/casename_${jobid}.xxhsum
+rm -f ${fname}
 
 ## Tests for finding monthly files
 tfile="NHISTpiaeroxid_f09_tn14_keyClim20201217.clm2.h0.1852-02.nc"
@@ -118,6 +154,8 @@ dates="$(get_ice_hist_file_info ${ice_file})"
 check_test "CICE dates test" "${dates}" "${tstring}"
 years="$(get_range_year ${dates} ${ice_file})"
 check_test "CICE year set test" "${years}" "2000"
+year0="$(get_year0_from_time_attrib ${ice_file})"
+check_test "CICE year0 test" "${year0}" "0000"
 dates=(31 59 90 120 151 181 212 243 273 304 334 365)
 tvals=("00000131" "00000228" "00000331" "00000430" "00000531" "00000630" "00000731" "00000831" "00000930" "00001031" "00001130" "00001231")
 for ind in $(seq 0 $((${#dates[@]} - 1))); do
@@ -151,7 +189,7 @@ years="$(get_range_year ${dates} ${lnd_file})"
 check_test "CTSM year set test" "${years}" "1859"
 rof_file="${testdir}/rof_test_file.mosart_0001.h0.2000-05.nc"
 dates="$(get_rof_hist_file_info ${rof_file})"
-check_test "MOSART dates test" "${dates}" "1:20000601"
+check_test "MOSART dates test" "${dates}" "1:200005xx"
 years="$(get_range_year ${dates} ${rof_file})"
 check_test "MOSART year set test" "${years}" "2000"
 
@@ -202,6 +240,7 @@ check_test "multi-year range month test" "${month}" "get_range_month: Multiple y
 atm_file="${testdir}/atm_test_file.cam_0001.h1.2000-06-13-00000.nc"
 tdate="$(get_file_date ${atm_file} atm yearly)"
 check_test "atm yearly get_file_date test" "${tdate}" "2000"
+ice_file="${testdir}/ice_test_file.cice_0001.h.2000-05.nc"
 tdate="$(get_file_date ${ice_file} ice yearly)"
 check_test "ice yearly get_file_date test" "${tdate}" "2000"
 lnd_file="${testdir}/lnd_test_file.clm2_0001.h1.2000-12-27-00000.nc"
@@ -218,7 +257,7 @@ check_test "ice monthly get_file_date test" "${tdate}" "2000:05"
 tdate="$(get_file_date ${lnd_file} lnd monthly)"
 check_test "lnd monthly get_file_date test" "${tdate}" "get_range_month: Multiple years found in ${lnd_file}"
 tdate="$(get_file_date ${rof_file} rof monthly)"
-check_test "rof monthly get_file_date test" "${tdate}" "2000:06"
+check_test "rof monthly get_file_date test" "${tdate}" "2000:05"
 
 ## Check some invalid inputs
 tdate="$(get_file_date ${atm_file} "foo" "yearly")"

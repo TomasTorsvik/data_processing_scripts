@@ -2,26 +2,37 @@
 
 ### Tool to concatenate and compress NorESM day-files to month- or year-files
 ##
-## Currently able to handle output files from 'ice', 'atm', 'lnd', and 'rof' components.
+## Currently able to handle output files from 'atm', 'ice', 'lnd',
+##    'ocn', and 'rof' components.
 
 # Modified by Steve Goldhaber Met, 2023
-# Modified by Tyge Løvset NORCE, 2022
+# Original version from Tyge Løvset NORCE, last modification 2022
 # use on e.g.:
 # /projects/NS9560K/noresm/cases/N1850frc2_f09_tn14_20191113
 
 ## Update the script version here to indicate changes
 ## Use semantic versioning (https://semver.org/).
-VERSION="0.0.6"
+VERSION="0.0.7"
 
 # Store some pathnames, find tools needed by this script
 tool=$(basename $0)
-cprnc=$(dirname $(realpath $0))/cprnc
-xxhsum=$(dirname $(realpath $0))/xxhsum
+tooldir=$(dirname $(realpath $0))
+bindir="/projects/NS9560K/local/bin"
+cprnc=${tooldir}/cprnc
+xxhsum=${tooldir}/xxhsum
 if [ ! -x "${cprnc}" ]; then
-  xxhsum="/projects/NS9560K/local/bin/cprnc"
+    cprnc="${bindir}/cprnc"
+fi
+if [ ! -x "${cprnc}" ]; then
+    echo  "ERROR: No cprnc tool found, should be installed at ${bindir}"
+    exit 1
 fi
 if [ ! -x "${xxhsum}" ]; then
-  xxhsum="/projects/NS9560K/local/bin/xxhsum"
+    xxhsum="${bindir}/xxhsum"
+fi
+if [ ! -x "${xxhsum}" ]; then
+    echo  "ERROR: No xxhsum tool found, should be installed at ${bindir}"
+    exit 1
 fi
 
 ## Need to set the locale to be compatible with ncks output
@@ -44,6 +55,7 @@ UNITTESTMODE="no"  # Used for unit testing, skip input checking, error checks, a
 declare -i VERBOSE=0  # Use --verbose to get more output
 
 ## Error codes
+SUCCESS=0              # Routine ran without error
 ERR_BADARG=02          # Bad command line argument
 ERR_NCKS_MDATA=03      # Error extracting file metadata with ncks
 ERR_UNSUPPORT_CAL=04   # Unsupported NetCDF calendar type
@@ -65,17 +77,25 @@ ERR_EXTRACT=19         # Error extracting frame using ncks
 ERR_CPRNC=20           # Error running cprnc
 ERR_NOCOMPRESS=21      # No files to compress
 ERR_NCRCAT=22          # Error running ncrcat
-ERR_INTERRUPT=23       # User or system interrupt
+ERR_COMPARE=23         # Error comparing original and compressed data
+ERR_INTERRUPT=24       # User or system interrupt
 
 ## Keep track of failures
 declare -A fail_report=()
 declare -A job_status=() # Status = created, in compress, compressed, in check, pass, fail
 declare -A error_reports=()
-## Have a global logfile so that it can be used even in the case of an error exit
-declare logfilename
+## Have a global logfile that can be of use even in the case of an error exit
+declare logfilename=""
+## Have a lock file that is created during errors from threaded regions
+declare err_lockfilename=""
+## Use a single timestamp for the logfile and xxhsum files
+declare JOBLID
+## Only report the job status once
+declare job_report_done="no"
 
 help() {
-    echo "Tool to convert NorESM day-files to month- or year-files"
+    echo -e "${tool}, version ${VERSION}\n"
+    echo "Tool to compress and convert NorESM day-files to month- or year-files"
     echo "Usage:"
     echo "  ${tool} [OPTIONS] <archive case path> <output path>"
     echo "       --comp              component (default 'ice:cice')"
@@ -111,7 +131,27 @@ log() {
 
 qlog() {
     ## Write a message ($@) to the logfile
-    echo "${@}" >> ${logfilename}
+    if [ -n "${logfilename}" ]; then
+        echo "${@}" >> ${logfilename}
+    fi
+}
+
+errlog() {
+    ## Write an error message ($@)
+    ## Error messages is echoed to the screen, the log file and the error log
+    echo "${@}" | tee -a ${logfilename}
+    if [ -n "${err_lockfilename}" ]; then
+        echo "${@}" >> ${err_lockfilename}
+    fi
+}
+
+fatal_error() {
+    ## Return true if a fatal error condition exists, false otherwise
+    if [ -n "${err_lockfilename}" -a -f "${err_lockfilename}" ]; then
+        true
+    else
+        false
+    fi
 }
 
 while [ $# -gt 0 ]; do
@@ -213,6 +253,7 @@ if [ "${UNITTESTMODE}" == "no" ]; then
     ulimit -s unlimited
 fi
 
+JOBLID=$(date +'%Y%m%d_%H%M%S')
 if [ "${UNITTESTMODE}" == "no" ]; then
     ## We have a bit of chicken and egg here.
     ## We can't log until we have a <logfilename> but
@@ -220,14 +261,14 @@ if [ "${UNITTESTMODE}" == "no" ]; then
     ## (possibly newly created) output directory.
     logmsgs=""
     ncrcat=$(which ncrcat)
-    lid=$(date +'%Y%m%d_%H%M%S')
     # The second positional argument is a location for output and logging
     if [ ! -d "${2}" ]; then
         logmsgs="Creating <output path>, '${2}'"
         mkdir -p ${2}
     fi
     outpath=$(realpath "${2}")
-    logfilename="${outpath}/${tool}.log.${lid}"
+    logfilename="${outpath}/${tool}.${JOBLID}.log"
+    err_lockfilename="${outpath}/${tool}.${JOBLID}.error"
 
     if [ -f "${logfilename}" ]; then
         rm -f ${logfilename}
@@ -240,7 +281,7 @@ if [ "${UNITTESTMODE}" == "no" ]; then
     # The first positional argument is the path to an existing case
     if [ ! -d "${1}" ]; then
         ERRMSG="<archive case path>, '${1}', does not exist"
-        log "ERROR: ${ERRMSG}"
+        errlog "ERROR: ${ERRMSG}"
         ERRCODE=${ERR_BADARG}
         exit ${ERRCODE}
     fi
@@ -269,7 +310,8 @@ if [ "${UNITTESTMODE}" == "no" ]; then
         log "Merge all files into one sequence"
     else
         ERRMSG="Undefined merge type, '${MERGETYPE}'."
-        log "ERROR: ${ERRMSG}"
+        errlog "ERROR: ${ERRMSG}"
+        ERRCODE=${ERR_BADARG}
     fi
     log "Compression: ${COMPRESS}"
     log "Threads: ${NTHREADS}"
@@ -281,6 +323,9 @@ if [ "${UNITTESTMODE}" == "no" ]; then
         log "ncrcat = $(which ncrcat)"
         log "ncks = $(which ncks)"
         log "===================="
+    fi
+    if [ ${ERRCODE} -ne ${SUCCESS} ]; then
+        exit ${ERRCODE}
     fi
 fi
 
@@ -297,14 +342,24 @@ report_job_status() {
     local -i nfails
     local -i tjobs            # Total number of jobs
     local -i nerrs=${#error_reports[@]}
+    if [ "${job_report_done}" != "no" ]; then
+        return
+    fi
     # Report on jobs run and any errors
     tjobs=${#job_status[@]}
     if [ ${tjobs} -ne ${job_num} ]; then
         ERRMSG="Internal error, job mismatch (${tjobs} != ${job_num})"
-        log "ERROR ${ERRMSG}"
+        errlog "ERROR ${ERRMSG}"
     fi
     nfails=$(echo "${fail_report[@]}" | tr ' ' '+' | bc)
-    if [ ${nfails} -gt 0 ]; then
+    if fatal_error; then
+        log "Job encountered fatal errors"
+# XXgoldyXX: v debug only
+        if [ -n "${err_lockfilename}" -a -f "${err_lockfilename}" ]; then
+            echo "lockfile, '${err_lockfilename}', exists?"
+        fi
+# XXgoldyXX: ^ debug only
+    elif [ ${nfails} -gt 0 ]; then
         for hfile in ${!job_status[@]}; do
             log "Job status for '${hfile}': ${job_status[${hfile}]}"
             if [ ${fail_report[${hfile}]} -gt 0 ]; then
@@ -319,6 +374,7 @@ report_job_status() {
             log "${error_reports[${hfile}]}"
         done
     fi
+    job_report_done="yes"
 }
 
 __cleanup() {
@@ -337,6 +393,7 @@ __cleanup() {
         fi
     fi
     rm -f ${outpath}/*.tmp
+    rm -f ${err_lockfilename}
     report_job_status ${res} ${#job_status[@]}
     if [ ${ERRCODE} -ne 0 ]; then
         exit ${ERRCODE}
@@ -438,7 +495,7 @@ get_hist_file_info() {
     res=$?
     if [ ${res} -ne 0 ]; then
         ERRMSG="get_hist_file_info: ERROR ${res} extracting ${2} from test file ${1}"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         error_reports[${1}]="${ERRMSG}"
         ERRCODE=${ERR_NCKS_MDATA}
         exit ${ERRCODE}
@@ -537,7 +594,7 @@ get_year0_from_time_attrib() {
     res=$?
     if [ ${res} -ne 0 ]; then
         ERRMSG="ERROR ${res} extracting time metadata from test file ${1}"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         error_reports[${1}]="${ERRMSG}"
         ERRCODE=${ERR_BAD_YEAR0}
         exit ${ERRCODE}
@@ -545,14 +602,14 @@ get_year0_from_time_attrib() {
     tstr=$(echo "${attrib}" | grep time:calendar)
     if [[ ! "${tstr,,}" =~ "noleap" ]]; then
         ERRMSG="Unsupported time calendar for '${1}', '${tstr}'"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         ERRCODE=${ERR_UNSUPPORT_CAL}
         exit ${ERRCODE}
     fi
     tstr=$(echo "${attrib}" | grep time:units)
     if [[ ! "${tstr}" =~ days\ since\ ([0-9]{4,})-01-01\ 00:00 ]]; then
         ERRMSG="Unsupported time units for '${1}', '${tstr}'"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         ERRCODE=${ERR_UNSUPPORT_TIME}
         exit ${ERRCODE}
     else
@@ -562,10 +619,11 @@ get_year0_from_time_attrib() {
 }
 
 get_ice_hist_file_info() {
-    ## Given a path to a CICE history file ($1), return the number of frames and the
-    ## date array values (one for each frame)
-    ## CICE (at least CICE5) has time as "days since yyyy-01-01 00:00:00" attribute
-    ##    and a noleap calendar. Check these attributes and derive the date from the time
+    ## Given a path to a CICE history file ($1), return the number of
+    ##    frames and the date array values (one for each frame)
+    ## CICE (at least CICE5) has time as "days since yyyy-01-01 00:00:00"
+    ##    attribute and a noleap calendar. Check these attributes and
+    ##    derive the date from the time.
 
     local times=()
     local tind
@@ -584,6 +642,11 @@ get_ice_hist_file_info() {
     ## Convert times to dates
     for tind in $(seq 1 $((${#times[@]} - 1))); do
         times[${tind}]=$(convert_time_to_date ${times[${tind}]} ${year0})
+        if [ "${times[${tind}]}" == "ERROR" ]; then
+            ERRMSG="${times[${tind}]}"
+            ERRCODE=${ERR_UNSUPPORT_CAL}
+            exit ${ERRCODE}
+        fi
     done
     echo  ${times[@]} | tr ' ' ':'
 }
@@ -615,6 +678,11 @@ get_ocn_hist_file_info() {
         ## Convert times to dates
         for tind in $(seq 1 $((${#times[@]} - 1))); do
             times[${tind}]=$(convert_time_to_date ${times[${tind}]} ${year0})
+            if [ "${times[${tind}]}" == "ERROR" ]; then
+                ERRMSG="${times[${tind}]}"
+                ERRCODE=${ERR_UNSUPPORT_CAL}
+                exit ${ERRCODE}
+            fi
         done
         dates="$(echo  ${times[@]} | tr ' ' ':')"
     fi
@@ -643,19 +711,19 @@ greater_than() {
     # Return zero if $1 > $2, one otherwise
     if [ -z "${1}" ]; then
         ERRMSG="greater_than requires two arguments, was called with none"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         ERRCODE=${ERR_BADARG_GT}
         exit ${ERRCODE}
     elif [ -z "${2}" ]; then
         ERRMSG="greater_than requires two arguments, was called with '${1}'"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         ERRCODE=${ERR_BADARG_GT}
         exit ${ERRCODE}
     fi
     bcval="$(echo "${1} > ${2}" | bc --quiet)"
     if [ -z "${bcval}" ]; then
         ERRMSG="Bad bc call in greater_than: echo \"${1} > ${2}\" | bc --quiet"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         ERRCODE=${ERR_BADARG_GT}
         exit ${ERRCODE}
     fi
@@ -667,19 +735,19 @@ less_than() {
     local bcval # Output from bc
     if [ -z "${1}" ]; then
         ERRMSG="less_than requires two arguments, was called with none"
-        log "ERROR: ${ERRMSG}"
+        errlog "ERROR: ${ERRMSG}"
         ERRCODE=${ERR_BADARG_LT}
         exit ${ERRCODE}
     elif [ -z "${2}" ]; then
         ERRMSG="less_than requires two arguments, was called with '${1}'"
-        log "ERROR: ${ERRMSG}"
+        errlog "ERROR: ${ERRMSG}"
         ERRCODE=${ERR_BADARG_LT}
         exit ${ERRCODE}
     fi
     bcval="$(echo "${1} < ${2}" | bc --quiet)"
     if [ -z "${bcval}" ]; then
         ERRMSG="Bad bc call in less_than: echo \"${1} < ${2}\" | bc --quiet"
-        log "ERROR: ${ERRMSG}"
+        errlog "ERROR: ${ERRMSG}"
         ERRCODE=${ERR_BADARG_LT}
         exit ${ERRCODE}
     fi
@@ -701,24 +769,25 @@ bnds_from_array() {
         if less_than ${frame} ${minval}; then
             minval="${frame}"
             if [ -n "${ERRMSG}" ]; then
-                exit ${ERRCODE}
+                return ${ERRCODE}
             fi
         fi
         if greater_than ${frame} ${minval}; then
             maxval="${frame}"
             if [ -n "${ERRMSG}" ]; then
-                exit ${ERRCODE}
+                return ${ERRCODE}
             fi
         fi
     done
     echo "${minval},${maxval}"
+    return ${SUCCESS}
 }
 
 get_year_from_date() {
     ## Given a date string, return the year
     if [ ${#1} -lt 8 ]; then
         ERRMSG="ERROR: get_year_from_date; Bad date string, '${1}'"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         error_reports["get_year_from_date_${1}"]="${ERRMSG}"
         ERRCODE=${ERR_BAD_DATESTR}
         exit ${ERRCODE}
@@ -731,7 +800,7 @@ get_month_from_date() {
     ## Given a date string, return the month
     if [ ${#1} -lt 8 ]; then
         ERRMSG="ERROR: get_month_from_date; Bad date string, '${1}'"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         error_reports["get_month_from_date_${1}"]="${ERRMSG}"
         ERRCODE=${ERR_BAD_DATESTR}
         exit ${ERRCODE}
@@ -744,7 +813,7 @@ get_day_from_date() {
     ## Given a date string, return the day of the month
     if [ ${#1} -lt 8 ]; then
         ERRMSG="ERROR: get_day_from_date; Bad date string, '${1}'"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         error_reports["get_day_from_date_${1}"]="${ERRMSG}"
         ERRCODE=${ERR_BAD_DATESTR}
         exit ${ERRCODE}
@@ -774,13 +843,13 @@ get_range_year() {
         elif [[ ! "${tyear}" =~ ^[0-9]+$ ]]; then
             ERRMSG="get_range_year: Invalid year found in ${file}"
             year="ERROR"
-            log "${ERRMSG}"
+            errlog "${ERRMSG}"
             ERRCODE=${ERR_BADYEAR}
             break
         elif [ "${year}" != "${tyear}" ]; then
             ERRMSG="get_range_year: Multiple years found in ${file}"
             year="ERROR"
-            log "${ERRMSG}"
+            errlog "${ERRMSG}"
             ERRCODE=${ERR_MULTYEARS}
             break
         fi
@@ -819,7 +888,7 @@ get_range_month() {
             if [ ${month} -ge 0 ]; then
                 ERRMSG="get_range_month: Internal error, month = ${month}"
                 month="ERROR"
-                log "${ERRMSG}"
+                errlog "${ERRMSG}"
                 ERRCODE=${ERR_INTERNAL}
                 exit ${ERRCODE}
             else
@@ -828,31 +897,31 @@ get_range_month() {
         elif [ ${month} -lt 0 ]; then
             ERRMSG="get_range_month: Internal error, year = ${year}"
             month="ERROR"
-            log "${ERRMSG}"
+            errlog "${ERRMSG}"
             ERRCODE=${ERR_INTERNAL}
             exit ${ERRCODE}
         elif [[ ! "${tyear}" =~ ^[0-9]+$ ]]; then
             ERRMSG="get_range_month: Invalid year found in ${file}"
             year="ERROR"
-            log "${ERRMSG}"
+            errlog "${ERRMSG}"
             ERRCODE=${ERR_INTERNAL}
             exit ${ERRCODE}
         elif [[ ! "${tmonth}" =~ ^[0-9]+$ ]]; then
             ERRMSG="get_range_month: Invalid month found in ${file}"
             month="ERROR"
-            log "${ERRMSG}"
+            errlog "${ERRMSG}"
             ERRCODE=${ERR_INTERNAL}
             exit ${ERRCODE}
         elif [ "${year}" != "${tyear}" ]; then
             ERRMSG="get_range_month: Multiple years found in ${file}"
             month="ERROR"
-            log "${ERRMSG}"
+            errlog "${ERRMSG}"
             ERRCODE=${ERR_MULTYEARS}
             exit ${ERRCODE}
         elif [ "${month}" != "${tmonth}" ]; then
             ERRMSG="get_range_month: Multiple months found in ${file}"
             month="ERROR"
-            log "${ERRMSG}"
+            errlog "${ERRMSG}"
             ERRCODE=${ERR_MULTMONTHS}
             exit ${ERRCODE}
         fi
@@ -872,17 +941,17 @@ get_file_date() {
     local tdates=""
     if [ ! -f "${hfile}" ]; then
         ERRMSG="get_file_date: File does not exist, '${hfile}'"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         ERRCODE=${ERR_MISSING_FILE}
         exit ${ERRCODE}
     elif [ "${merge}" == "mergeall" ]; then
         ERRMSG="get_file_date: Unsupported merge type, '${merge}'"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         ERRCODE=${ERR_UNSUPPORT_MERGE}
         exit ${ERRCODE}
     elif [ "${merge}" != "yearly" -a "${merge}" != "monthly" ]; then
         ERRMSG="get_file_date: Unrecognized merge type, '${merge}'"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         ERRCODE=${ERR_BAD_MERGETYPE}
         exit ${ERRCODE}
     else
@@ -913,7 +982,7 @@ get_file_date() {
             fi
         else
             ERRMSG="get_file_date: Unrecognized component type, '${comp}'"
-            log "${ERRMSG}"
+            errlog "${ERRMSG}"
             ERRCODE=${ERR_BAD_COMPTYPE}
             exit ${ERRCODE}
         fi
@@ -934,11 +1003,55 @@ get_file_date() {
     echo "${tdate}"
 }
 
+get_xxhsum_filename() {
+    ## Given a filename or directory ($1), return the name for the xxhsum filename
+    ## to use for compression jobs in that directory.
+    local cdir=""  # The name of the directory where $1 is located
+    local fname="" # The xxhsum filename
+    local pdir     # Parent directory name
+    if [ -f "${1}" ]; then
+        cdir="$(realpath $(dirname ${1}))"
+    elif [ -d "$(realpath ${1})" ]; then
+        cdir="$(realpath ${1})"
+    else
+        ERRMSG="get_xxhsum_filename: Invalid filename or directory input, '${1}'"
+        errlog "${ERRMSG}"
+        ERRCODE=${ERR_INTERNAL}
+        return ${ERRCODE}
+    fi
+    if [ -n "${cdir}" ]; then
+        if [ "$(basename ${cdir})" == "hist" ]; then
+            ## We are in a component directory, grab the component name
+            ## and the casedir name (above component)
+            pdir="$(dirname ${cdir})" # e.g., ice, ocn
+            fname="$(basename $(dirname ${pdir}))_$(basename ${pdir})"
+        elif [ -f "${1}" ]; then
+            ## Take the case name from the filename
+            fname=$(echo $(basename "${1}") | cut -d'.' -f1)
+        else
+            ## Just take the name of the directory
+            fname="$(basename ${cdir})"
+        fi
+        fname="${cdir}/${fname}_${JOBLID}.xxhsum"
+        if [ ! -f "${fname}" ]; then
+            touch ${fname}
+        fi
+        echo "${fname}"
+        return ${SUCCESS}
+    else
+        ERRMSG="get_xxhsum_filename: Invalid filename or directory input, '${1}'"
+        errlog "${ERRMSG}"
+        ERRCODE=${ERR_INTERNAL}
+        return ${ERRCODE}
+    fi
+}
+
 compare_frames() {
     ## Compare the output file ($1) with some of the corresponding
     ## input files ($4-)
     ## $2 is the component type (e.g., atm, ice)
     ## $3 is a unique job number to allow thread-safe temporary filenames
+    ## Return SUCCESS or an error code
     local outfile=${1}
     local comp=${2}
     local job_num=${3}
@@ -956,7 +1069,7 @@ compare_frames() {
     local pass                     # Var used to test cprnc pass / fail
     local passmsg="."              # Pass / Fail message
     local pl=""                    # 's' for multiple test frames
-    local res                      # Test if last command succeeded (zero return)
+    local res=${SUCCESS}           # Test if last command succeeded (zero return)
     local sfile                    # Source file currently being checked
     local test_filename            # Unique temp filename for extracted frames
     local timevar                  # Variable name containing the time (or date) information
@@ -966,11 +1079,12 @@ compare_frames() {
         # This should not happen!
         ERRMSG="Temp filename, '${test_filename}', already exists"
         log "INTERNAL ERROR: ${ERRMSG}"
-        job_status[${outfile}]="ERROR: ${ERRMSG}"
+        error_reports[${outfile}]="${ERRMSG}"
+        job_status[${outfile}]="ERROR"
         nfail=$((nfail + 1))
         fail_report[${outfile}]=${nfail}
         ERRCODE=${ERR_INTERNAL}
-        exit ${ERRCODE}
+        return  ${ERRCODE}
     fi
     if [ "${COMPARE}" == "Spot" ]; then
         num_check_files=$(((${numfiles} + 7) / 10)) # Plus first and last source file
@@ -1007,19 +1121,21 @@ compare_frames() {
             log "INTERNAL ERROR: ${ERRMSG}"
             log "INTERNAL ERROR: check_files=(${check_files[@]})"
             log "INTERNAL ERROR: files=(${files[@]})"
-            job_status[${outfile}]="INTERNAL ERROR: ${ERRMSG}"
+            error_reports[${outfile}]="${ERRMSG}"
+            job_status[${outfile}]="ERROR"
             nfail=$((nfail + 1))
             fail_report[${outfile}]=${nfail}
             ERRCODE=${ERR_INTERNAL}
-            exit ${ERRCODE}
+            return ${ERRCODE}
         elif [ ! -f "${sfile}" ]; then
             ERRMSG="file in compare_frames, '${files[${check_file}-1]}', does not exist"
             log "INTERNAL ERROR: ${ERRMSG}"
-            job_status[${outfile}]="INTERNAL ERROR: ${ERRMSG}"
+            error_reports[${outfile}]="${ERRMSG}"
+            job_status[${outfile}]="ERROR"
             nfail=$((nfail + 1))
             fail_report[${outfile}]=${nfail}
             ERRCODE=${ERR_INTERNAL}
-            exit ${ERRCODE}
+            return ${ERRCODE}
         fi
         ## Extract the time dimension for this file
         timevar="time"
@@ -1031,12 +1147,13 @@ compare_frames() {
         res=$?
         if [ ${res} -ne 0 ]; then
             ERRMSG="${res} extracting time from test file ${check_file}"
-            log "ERROR: ${ERRMSG}"
-            job_status[${outfile}]="ERROR: ${ERRMSG}"
+            errlog "ERROR: ${ERRMSG}"
+            error_reports[${outfile}]="${ERRMSG}"
+            job_status[${outfile}]="ERROR"
             nfail=$((nfail + 1))
             fail_report[${outfile}]=${nfail}
             ERRCODE=${ERR_BAD_TIME}
-            exit ${ERRCODE}
+            return ${ERRCODE}
         fi
         if [ ${#ftimes[@]} -gt 1 ]; then
             pl="s"
@@ -1049,8 +1166,16 @@ compare_frames() {
         ##    however, that means pulling frames out of the source
         ##    file which takes time and space.
         bnds_str="$(bnds_from_array ${ftimes[@]}),1"
-        if [ -n "${ERRMSG}" ]; then
-            exit ${ERRCODE}
+        res=$?
+        if [ ${res} -ne ${SUCCESS} ]; then
+            ERRMSG="${bnds_str}"
+            ERRCODE=${res}
+            log "ERROR ${res}: ${ERRMSG}"
+            error_reports[${outfile}]="${ERRMSG}"
+            job_status[${outfile}]="ERROR ${res}: ${ERRMSG}"
+            nfail=$((nfail + 1))
+            fail_report[${outfile}]=${nfail}
+            return ${ERRCODE}
         fi
         nco_args="-d ${timevar},${bnds_str} ${outfile} ${test_filename}"
         if [ "${DRYRUN}" == "yes" ]; then
@@ -1063,12 +1188,15 @@ compare_frames() {
             res=$?
             if [ ${res} -ne 0 ]; then
                 ERRMSG="${res} extracting test frame${pl} from output file"
-                log "ERROR: ${ERRMSG}"
-                job_status[${outfile}]="ERROR: ${ERRMSG}"
+                errlog "ERROR: ${ERRMSG}"
+                job_status[${outfile}]="ERROR"
+                error_reports[${outfile}]="${ERRMSG}"
                 nfail=$((nfail + 1))
                 fail_report[${outfile}]=${nfail}
                 ERRCODE=${ERR_EXTRACT}
-                exit ${ERRCODE}
+                ## Cleanup
+                rm -f ${test_filename}
+                return ${ERRCODE}
             fi
         fi
         ## Run cprnc to test output frame against input file
@@ -1087,23 +1215,29 @@ compare_frames() {
             res=$?
             if [ ${res} -ne 0 ]; then
                 ERRMSG="${res} running cprnc to verify output frame${pl} from file, ${sfile}"
-                log "ERROR: ${ERRMSG}"
-                job_status[${outfile}]="ERROR: ${ERRMSG}"
+                errlog "ERROR: ${ERRMSG}"
+                job_status[${outfile}]="ERROR"
                 nfail=$((nfail + 1))
                 fail_report[${outfile}]=${nfail}
+                error_reports[${outfile}]="${ERRMSG}"
                 ERRCODE=${ERR_CPRNC}
-                exit ${ERRCODE}
+                ## Cleanup
+                rm -f ${test_filename}
+                return ${ERRCODE}
             fi
             grep 'diff_test' ${diff_output} | grep --quiet IDENTICAL
             pass=$?
             if [ $pass -eq 0 ]; then
                 log "Checking ${sfile} against output frame${pl} . . . PASS"
             else
+                # Log the comparison failure but do not return an error
                 ERRMSG="Checking ${sfile} against output frame${pl} . . . FAIL"
-                log "${ERRMSG}"
+                errlog "${ERRMSG}"
                 log "cprnc output saved in ${diff_output}"
-                job_status[${outfile}]="ERROR: ${ERRMSG}"
+                error_reports[${outfile}]="${ERRMSG}"
+                job_status[${outfile}]="ERROR"
                 nfail=$((nfail + 1))
+                fail_report[${outfile}]=${nfail}
             fi
         fi
         ## Cleanup
@@ -1119,23 +1253,26 @@ compare_frames() {
     fi
     fail_report[${outfile}]=${nfail}
     log "${endmsg}${passmsg}"
+    return ${res}
 }
 
-convert_cmd()
-{
+convert_cmd() {
     ## Compress files ($4-) into a single file, $1.
     ## $3 is the model type (e.g., atm, lnd)
     ## $4 is a unique job number to allow thread-safe temporary filenames
+    ## Return
     local outfile=${1}
     local comp=${2}
     local job_num=${3}
-    local reffile
     shift 3
     local files=($@)
     local nfil
     local numfiles="${#files[@]}"
     local reffile="${files[-1]}"
+    local res
+    local retcode=${SUCCESS}
     local vmsg
+    local xxhsumfile
 
     if [ ${VERBOSE} -ge 1 ]; then
         vmsg="Concatenating ${#files[@]} to ${outfile} using level ${COMPRESS} compression"
@@ -1146,9 +1283,11 @@ convert_cmd()
     if [ ${#files[@]} -eq 0 ]; then
         ERRMSG="INTERNAL ERROR: No files to compress to '${outfile}'?"
         error_reports[${outfile}]="${ERRMSG}"
-        log "${ERRMSG}"
+        errlog "${ERRMSG}"
         ERRCODE=${ERR_NOCOMPRESS}
-        exit ${ERRCODE}
+        retcode=${ERRCODE}
+        job_status[${outfile}]="ERROR"
+        fail_report[${outfile}]=${ERRCODE}
     elif [ "${DRYRUN}" == "yes" ]; then
         log "${ncrcat} -O -4 -L ${COMPRESS} ${files[@]} -o ${outfile}"
     else
@@ -1159,44 +1298,74 @@ convert_cmd()
         res=$?
         if [ ${res} -ne 0 ]; then
             ERRMSG="ERROR ${res} concatenating ${files[@]}"
-            log "${ERRMSG}"
-            error_reports[${1}]="${ERRMSG}"
+            errlog "${ERRMSG}"
+            error_reports[${outfile}]="${ERRMSG}"
             ERRCODE=${ERR_NCRCAT}
-            exit ${ERRCODE}
+            retcode=${ERRCODE}
+            job_status[${outfile}]="ERROR"
+            fail_report[${outfile}]=${ERRCODE}
         fi
     fi
-    job_status[${outfile}]="compressed"
-    fail_report[${outfile}]=0
-
-    if [ -f "${outfile}" ]; then
-        if [ "${DRYRUN}" == "yes" ]; then
-            log "${xxhsum} -H2 ${outfile} >> ${outfile}.xxhsum"
+    if [ ${retcode} -eq ${SUCCESS} ]; then
+        job_status[${outfile}]="compressed"
+        fail_report[${outfile}]=${SUCCESS}
+    fi
+    if [ ${retcode} -eq ${SUCCESS} ]; then
+        xxhsumfile=$(get_xxhsum_filename ${outfile})
+        res=$?
+        if [ ${res} -ne ${SUCCESS} ]; then
+            # Need to define error message and code since func was called in subshell
+            ERRMSG="${xxhsumfile}"
+            ERRCODE=${ERR_INTERNAL}
+            retcode=${ERRCODE}
+            xxhsumfile=""
+            job_status[${outfile}]="ERROR"
+            fail_report[${outfile}]=${ERRCODE}
+        elif [ "${DRYRUN}" == "yes" ]; then
+            log "${xxhsum} -H2 ${outfile} >> ${xxhsumfile}"
         else
-            $(touch -r $reffile ${outfile})
-            ${xxhsum} -H2 ${outfile} >> ${outfile}.xxhsum
+            touch -r $reffile ${outfile}
+            ${xxhsum} -H2 ${outfile} >> ${xxhsumfile}
+            res=$?
+            if [ ${res} -ne ${SUCCESS} ]; then
+                ERRMSG="ERROR ${res} running xxhsum on ${outfile}"
+                errlog "${ERRMSG}"
+                error_reports[${outfile}]="${ERRMSG}"
+                ERRCODE=${ERR_INTERNAL}
+                retcode=${ERRCODE}
+                job_status[${outfile}]="ERROR"
+                fail_report[${outfile}]=${ERRCODE}
+            fi
         fi
         if [ ${numfiles} -eq 1 ]; then
             nfil="file"
         else
             nfil="files"
         fi
+    fi
+    if [ ${retcode} -eq ${SUCCESS} ]; then
         if [ "${DRYRUN}" == "yes" ]; then
             log "DRYRUN: $(basename ${outfile}): ${numfiles} ${nfil} merged"
         else
             log "DONE: $(basename ${outfile}): ${numfiles} ${nfil} merged"
         fi
         compare_frames "${outfile}" ${comp} ${job_num} ${files[@]}
-        if [ -n "${ERRMSG}" ]; then
-            exit ${ERRCODE}
-        fi
-        if [ ${MOVE} -eq 1 ]; then
+        res=$?
+        if [ ${res} -ne ${SUCCESS} ]; then
+            error_reports[${outfile}]="${ERRMSG}"
+            ERRCODE=${ERR_COMPARE}
+            retcode=${ERRCODE}
+            job_status[${outfile}]="ERROR"
+            fail_report[${outfile}]=${ERRCODE}
+        elif [ ${MOVE} -eq 1 ]; then
             if [ "${DRYRUN}" == "yes" ]; then
                 log "Not moving source files (DRYRUN)"
             else
                 mv ${files[@]} ${MOVEDIR}
             fi
-        fi
+        fi # No else, compare was successful but no move happening
     fi
+    return ${retcode}
 }
 
 convert_loop() {
@@ -1217,9 +1386,11 @@ convert_loop() {
     local mod                 # The name of the model (e.g., cam, cice)
     local msg                 # For constructing log messages
     local multiout="no"       # Create output directory for each component
+    local -i  nfails=0        # Figure out if any job has failed.
     local -i njobs            # Current number of running jobs
     local outfile             # Filename for compressed output file
     local outdir              # Location of compressed files
+    local retcode
     local setname             # Temp variable to hold a file set name
     local tdate               # Temporary date field
     if  [ ${#COMPONENTS[@]} -eq 0 ]; then
@@ -1274,8 +1445,8 @@ convert_loop() {
                     fi
                 done
                 if [ -n "${ERRMSG}" ]; then
-                    log "${ERRMSG}"
-                    exit ${ERRCODE}
+                    errlog "${ERRMSG}"
+                    return ${ERRCODE}
                 fi
                 for tdate in ${!dates[@]}; do
                     ((job_num++))
@@ -1298,7 +1469,8 @@ convert_loop() {
                         log "${msg}"
                         job_status[${outfile}]="created"
                         convert_cmd ${outfile} ${comp} ${job_num} ${file_list[@]}
-                        if [ -n "${ERRMSG}" ]; then
+                        retcode=$?
+                        if [ ${retcode} -ne ${SUCCESS} ]; then
                             exit ${ERRCODE}
                         fi
                     else
@@ -1307,7 +1479,7 @@ convert_loop() {
                             ## Wait to launch a new conversion until the number of jobs is low enough.
                             njobs=$(jobs -r | wc -l)
                             if [ ${njobs} -lt ${NTHREADS} ]; then
-                                if [ -n "${ERRMSG}" ]; then
+                                if fatal_error; then
                                     break
                                 fi
                                 log "${msg}"
@@ -1320,17 +1492,17 @@ convert_loop() {
                             fi
                             sleep 0.5s
                         done
-                        if [ -n "${ERRMSG}" ]; then
+                        if fatal_error; then
                             break
                         fi
                     fi
                 done
-                if [ -n "${ERRMSG}" ]; then
+                if fatal_error; then
                     break
                 fi
             done
-            if [ -n "${ERRMSG}" ]; then
-                exit ${ERRCODE}
+            if fatal_error; then
+                break
             fi
         else
             # We will merge all files in each member of compnames.
@@ -1360,17 +1532,23 @@ convert_loop() {
                     log "${msg}"
                     job_status[${outfile}]="created"
                     convert_cmd ${outfile} ${comp} ${job_num} ${file_list[@]}
-                    if [ -n "${ERRMSG}" ]; then
+                    retcode=$?
+                    if [ ${retcode} -ne ${SUCCESS} ]; then
                         exit ${ERRCODE}
                     fi
                 else
                     nexttime=$(($(date +%s)))
                     while :; do
-                        ## Wait to launch a new conversion until the number of jobs is low enough.
+                        ## Wait to launch a new conversion until the
+                        ##    number of jobs is low enough.
+                        if fatal_error; then
+                            break
+                        fi
                         njobs=$(jobs -r | wc -l)
                         if [ ${njobs} -lt ${NTHREADS} ]; then
-                            if [ -n "${ERRMSG}" ]; then
-                                exit ${ERRCODE}
+                            nfails=$(echo "${fail_report[@]}" | tr ' ' '+' | bc)
+                            if [ -n "${ERRMSG}" -o ${nfails} -gt 0 ]; then
+                                break
                             fi
                             log "${msg}"
                             job_status[${outfile}]="created"
@@ -1382,13 +1560,21 @@ convert_loop() {
                         fi
                         sleep 0.5s
                     done
+                    if fatal_error; then
+                        break
+                    fi
                 fi
             done
+            if fatal_error; then
+                break
+            fi
         fi
         cd ${currdir}
     done
     wait
-    log "${tool} : completed"
+    if ! fatal_error; then
+        log "${tool} : completed"
+    fi
     # Report on jobs run and any errors
     report_job_status 0 ${job_num}
 }
@@ -1406,7 +1592,8 @@ if [ "${DRYRUN}" == "yes" -a "${UNITTESTMODE}" == "no" ]; then
 fi
 if [ "${UNITTESTMODE}" == "no" ]; then
     convert_loop
-    if [ -n "${ERRMSG}" ]; then
+    res=$?
+    if [ ${res} -ne ${SUCCESS} -o -n "${ERRMSG}" ]; then
         exit ${ERRCODE}
     fi
 fi
