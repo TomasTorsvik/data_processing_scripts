@@ -53,6 +53,26 @@ fi
 source ${rcat_script} --unit-test-mode
 perr $? "loading rcat_noresm.sh script, '${rcat_script}'"
 
+## Kill zombie jobs test
+zjob_done="no"
+zjob() {
+    while [ "${zjob_done}" != "yes" ]; do
+        sleep 2
+    done
+}
+zjob 1 &
+zjob 2 &
+zout="$(kill_zombie_jobs)"
+zcount=($(jobs))
+check_test "Zombie job nokill test" "${#zcount[@]}" "10"
+check_test "Zombie job nokill output test" "${zout}" ""
+zjob_done="yes"
+zout="$(echo $(kill_zombie_jobs Running) | tr '\n' ':')"
+zcount=($(jobs))
+zcheck='Killing Running job, 1 Killing Running job, 2:'
+check_test "Zombie job kill test" "${#zcount[@]}" "0"
+check_test "Zombie job kill output test" "${zout}" "${zcheck}"
+
 ## Multi-instance (ensemble) test
 tstring=()
 for inst in $(seq 1 25); do
