@@ -48,9 +48,10 @@ ERRCODE=0
 ERRMSG=""
 MOVEDIR="/scratch/${USER}/SOURCE_FILES_TO_BE_DELETED"
 MOVE=0
-MERGETYPE="yearly" # or "monthly" or "mergeall"
+MERGETYPE="yearly" # or "monthly" or "mergeall" or "compressonly"
 declare -i NTHREADS=4
 POSITIONAL=()
+PROGREPORTINT=5000
 UNITTESTMODE="no"  # Used for unit testing, skip input checking, error checks, and runs
 declare -i VERBOSE=0  # Use --verbose to get more output
 
@@ -102,7 +103,8 @@ help() {
     echo "   -y  --year  --yearly    merge per year (default)"
     echo "   -m  --month --monthly   merge per month"
     echo "   -a  --merge-all         merge all files"
-    echo "   -c  --compress N        compression 1-9 (default 2)"
+#    echo "       --compress-only     compress files but do not merge"
+    echo "   -c  --compress N        compression strength 1-9 (default 2)"
     echo "   -t  --threads N         parallel run (default 4)"
     echo "       --compare <option>  Options are \"Spot\" (spot check),"
     echo "                           \"Full\", or \"None\" (default)"
@@ -113,10 +115,15 @@ help() {
     echo "   -v  --version           print the current script version and exit"
     echo "   -h  --help              print this message and exit"
     echo ""
-    echo "--compare checks the fidelity of the merged file against a selection (spot) or"
-    echo "          every (full) source file. It does this by comparing the frame(s) of a"
-    echo "          source file with the corresponding frames of the merged file."
+    echo "--compare checks the fidelity of the merged file against a selection"
+    echo "          (spot) or every (full) source file. It does this by"
+    echo "          comparing the frame(s) of a source file with the"
+    echo "          corresponding frames of the merged file."
     echo "          Any differences are reported and cause an error exit."
+    echo "-y, --year, --yearly, -m, --month, --monthly, -a, --merge-all"
+#    echo "          , and --compress-only control the concatenation of files."
+    echo "          Choose one option (if multiple options are selected,"
+    echo "          only the last one entered is used)"
     if [ $# -gt 0 ]; then
         exit $1
     else
@@ -126,13 +133,13 @@ help() {
 
 log() {
     ## Echo a message ($@) to the terminal with a copy to the logfile
-    echo "${@}" | tee -a ${logfilename}
+    echo -e "${@}" | tee -a ${logfilename}
 }
 
 qlog() {
     ## Write a message ($@) to the logfile
     if [ -n "${logfilename}" ]; then
-        echo "${@}" >> ${logfilename}
+        echo -e "${@}" >> ${logfilename}
     fi
 }
 
@@ -141,7 +148,7 @@ errlog() {
     ## Error messages is echoed to the screen, the log file and the error log
     echo "${@}" | tee -a ${logfilename}
     if [ -n "${err_lockfilename}" ]; then
-        echo "${@}" >> ${err_lockfilename}
+        echo -e "${@}" >> ${err_lockfilename}
     fi
 }
 
@@ -155,91 +162,95 @@ fatal_error() {
 }
 
 while [ $# -gt 0 ]; do
-  key="$1"
-  case $key in
-    --comp)
-    if [ $# -lt 2 ]; then
-        echo "--comp requires a component name argument"
-        help
-    fi
-    COMPONENTS+=($2)
+    key="$1"
+    case $key in
+        --comp)
+            if [ $# -lt 2 ]; then
+                echo "--comp requires a component name argument"
+                help
+            fi
+            COMPONENTS+=($2)
+            shift
+            ;;
+        --compress-only)
+            MERGETYPE="compressonly"
+            ;;
+        -a|--merge-all)
+            MERGETYPE="mergeall"
+            ;;
+        -m|--month|--monthly)
+            MERGETYPE="monthly"
+            ;;
+        -y|--year|--yearly)
+            MERGETYPE="yearly"
+            ;;
+        -t|--threads)
+            if [ $# -lt 2 ]; then
+                echo "${key} requires a number of threads"
+                help
+            fi
+            NTHREADS=$2
+            shift
+            ;;
+        -c|--compress)
+            if [ $# -lt 2 ]; then
+                echo "${key} requires a compression level (number)"
+                help
+            fi
+            COMPRESS=$2
+            shift
+            ;;
+        --compare)
+            if [ $# -lt 2 ]; then
+                echo "${key} requires a comparison type"
+                help
+            fi
+            if [ "${2,,}" == "full" ]; then
+                COMPARE="Full"
+            elif [ "${2,,}" == "spot" ]; then
+                COMPARE="Spot"
+            elif [ "${2,,}" == "none" ]; then
+                COMPARE="None"
+            else
+                echo "Unknown option to --compare, '${2}'"
+                help 1
+            fi
+            shift
+            ;;
+        --move)
+            MOVE=1
+            ;;
+        --delete)
+            MOVE=1
+            DELETE=1
+            ;;
+        --dryrun)
+            DRYRUN="yes"
+            ;;
+        -h|--help)
+            help
+            ;;
+        --unit-test-mode)
+            ## Note, this is not documented (not a user-level switch)
+            UNITTESTMODE="yes"
+            ;;
+        --verbose)
+            VERBOSE=$((VERBOSE + 1))
+            PROGREPORTINT=$((PROGREPORTINT / 10))
+            ;;
+        -v|--version)
+            echo "${tool} version ${VERSION}"
+            exit 0
+            ;;
+        -*) # unknown
+            echo "ERROR: Unknown argument, '${1}'"
+            help 1
+            ;;
+        *) # positional arg
+            POSITIONAL+=("$1")
+            ;;
+    esac
     shift
-    ;;
-    -a|--merge-all)
-    MERGETYPE="mergeall"
-    ;;
-    -m|--month|--monthly)
-    MERGETYPE="monthly"
-    ;;
-    -y|--year|--yearly)
-    MERGETYPE="yearly"
-    ;;
-    -t|--threads)
-    if [ $# -lt 2 ]; then
-        echo "${key} requires a number of threads"
-        help
-    fi
-    NTHREADS=$2
-    shift
-    ;;
-    -c|--compress)
-    if [ $# -lt 2 ]; then
-        echo "${key} requires a compression level (number)"
-        help
-    fi
-    COMPRESS=$2
-    shift
-    ;;
-    --compare)
-    if [ $# -lt 2 ]; then
-        echo "${key} requires a comparison type"
-        help
-    fi
-    if [ "${2,,}" == "full" ]; then
-        COMPARE="Full"
-    elif [ "${2,,}" == "spot" ]; then
-        COMPARE="Spot"
-    elif [ "${2,,}" == "none" ]; then
-        COMPARE="None"
-    else
-        echo "Unknown option to --compare, '${2}'"
-    help 1
-    fi
-    shift
-    ;;
-    --move)
-    MOVE=1
-    ;;
-    --delete)
-    MOVE=1
-    DELETE=1
-    ;;
-    --dryrun)
-    DRYRUN="yes"
-    ;;
-    -h|--help)
-    help
-    ;;
-    --unit-test-mode)
-    ## Note, this is not documented (not a user-level switch)
-    UNITTESTMODE="yes"
-    ;;
-    --verbose)
-        VERBOSE=$((VERBOSE + 1))
-    ;;
-    -v|--version)
-    echo "${tool} version ${VERSION}"
-    exit 0
-    ;;
-    -*) # unknown
-    echo "ERROR: Unknown argument, '${1}'"
-    help 1
-    ;;
-    *) # positional arg
-    POSITIONAL+=("$1")
-    ;;
-  esac
-  shift
 done
 set -- "${POSITIONAL[@]}" # restore positional parameters
 
@@ -267,6 +278,12 @@ if [ "${UNITTESTMODE}" == "no" ]; then
         mkdir -p ${2}
     fi
     outpath=$(realpath "${2}")
+    if [ -f "${outpath}" ]; then
+        ERRMSG="Output path, \"${outpath}\", is not a writeable directory"
+        errlog "ERROR: ${ERRMSG}"
+        ERRCODE=${ERR_BADARG}
+        exit ${ERRCODE}
+    fi
     logfilename="${outpath}/${tool}.${JOBLID}.log"
     err_lockfilename="${outpath}/${tool}.${JOBLID}.error"
 
@@ -308,6 +325,8 @@ if [ "${UNITTESTMODE}" == "no" ]; then
         log "Merge files per year"
     elif [ "${MERGETYPE}" == "mergeall" ]; then
         log "Merge all files into one sequence"
+    elif [ "${MERGETYPE}" == "compressonly" ]; then
+        log "Do not merge files, compress only"
     else
         ERRMSG="Undefined merge type, '${MERGETYPE}'."
         errlog "ERROR: ${ERRMSG}"
@@ -354,11 +373,6 @@ report_job_status() {
     nfails=$(echo "${fail_report[@]}" | tr ' ' '+' | bc)
     if fatal_error; then
         log "Job encountered fatal errors"
-# XXgoldyXX: v debug only
-        if [ -n "${err_lockfilename}" -a -f "${err_lockfilename}" ]; then
-            echo "lockfile, '${err_lockfilename}', exists?"
-        fi
-# XXgoldyXX: ^ debug only
     elif [ ${nfails} -gt 0 ]; then
         for hfile in ${!job_status[@]}; do
             log "Job status for '${hfile}': ${job_status[${hfile}]}"
@@ -375,6 +389,33 @@ report_job_status() {
         done
     fi
     job_report_done="yes"
+}
+
+kill_zombie_jobs() {
+    ## Kill any jobs with a status listed as $1 (default Done)
+    local item       # Part of a job status line
+    local jobnum=""  # Job number
+    local jobstat="" # Job status
+    local killstat="Done"
+    if [ $# -gt 0 ]; then
+        killstat="${1}"
+    fi
+    for item in $(jobs); do
+        if [ -n "${jobnum}" ]; then
+            jobstat="${item}"
+        fi
+        if [[ "${item}" =~ \[([0-9]*)\] ]]; then
+            jobnum="${BASH_REMATCH[1]}"
+        fi
+        if [ -n "${jobnum}" -a -n "${jobstat}" ]; then
+            if [ "${jobstat}" == "${killstat}" ]; then
+                echo "Killing ${jobstat} job, ${jobnum}"
+                kill -9 "%${jobnum}" 2>&1 > /dev/null
+            fi
+            jobnum=""
+            jobstat=""
+        fi
+    done
 }
 
 __cleanup() {
@@ -1013,6 +1054,9 @@ get_xxhsum_filename() {
         cdir="$(realpath $(dirname ${1}))"
     elif [ -d "$(realpath ${1})" ]; then
         cdir="$(realpath ${1})"
+    elif [ "${DRYRUN}" == "yes" ]; then
+        ## For DRYRUN, pretend $1 is a directory
+        cdir="$(realpath ${1})"
     else
         ERRMSG="get_xxhsum_filename: Invalid filename or directory input, '${1}'"
         errlog "${ERRMSG}"
@@ -1033,7 +1077,7 @@ get_xxhsum_filename() {
             fname="$(basename ${cdir})"
         fi
         fname="${cdir}/${fname}_${JOBLID}.xxhsum"
-        if [ ! -f "${fname}" ]; then
+        if [ ! -f "${fname}" -a -d "${cdir}" ]; then
             touch ${fname}
         fi
         echo "${fname}"
@@ -1387,16 +1431,21 @@ convert_loop() {
     local msg                 # For constructing log messages
     local multiout="no"       # Create output directory for each component
     local -i  nfails=0        # Figure out if any job has failed.
+    local -i nfileproc=0      # Number of files cataloged so far
     local -i njobs            # Current number of running jobs
     local outfile             # Filename for compressed output file
     local outdir              # Location of compressed files
     local retcode
     local setname             # Temp variable to hold a file set name
     local tdate               # Temporary date field
+    local termstr=""          # Special output only for terminal
     if  [ ${#COMPONENTS[@]} -eq 0 ]; then
         COMPONENTS+=("ice:cice")
     elif [ ${#COMPONENTS[@]} -gt 1 ]; then
       multiout="yes"
+    fi
+    if [ -t 1 ]; then
+        termstr='\e[1A\e[K'
     fi
     for component in ${COMPONENTS[@]}; do
         comparr=(${component//:/ })
@@ -1426,7 +1475,13 @@ convert_loop() {
                 # We assume that all file sets encompass the same dates.
                 # Also, gather all the dates (years or year:month pairs)
                 dates=()
+                log "Cataloging history files for ${comp}\n"
                 for hfile in ${hist_files[@]}; do
+                    nfileproc=$((nfileproc + 1))
+                    if [ $((nfileproc % PROGREPORTINT)) -eq 0 ]; then
+                        # Progess bar only to terminal, not logged
+                        echo -e "${termstr}$((nfileproc - 1)) files cataloged"
+                    fi
                     if [ "$(get_file_set_name ${hfile})" == "${cname}" ]; then
                         tdate="$(get_file_date ${hfile} ${comp} ${MERGETYPE})"
                         if [ -n "${ERRMSG}" ]; then
@@ -1487,7 +1542,7 @@ convert_loop() {
                                 convert_cmd ${outfile} ${comp} ${job_num} ${file_list[@]} &
                                 break
                             elif [ ${VERBOSE} -ge 2 -a $(($(date +s))) -gt ${nexttime} ]; then
-                                log "Waiting or job thread, currently running ${njobs} / ${NTHREADS}"
+                                log "Waiting for job thread, currently running ${njobs} / ${NTHREADS}"
                                 nexttime=$(($(date +%s) + 60))
                             fi
                             sleep 0.5s
@@ -1571,6 +1626,13 @@ convert_loop() {
         fi
         cd ${currdir}
     done
+    # Make sure all jobs have finished
+    if [ ${NTHREADS} -gt 1 ]; then
+        log "Waiting for jobs to finish"
+        if [ ${VERBOSE} -ge 1 ]; then
+            log "$(jobs)"
+        fi
+    fi
     wait
     if ! fatal_error; then
         log "${tool} : completed"
