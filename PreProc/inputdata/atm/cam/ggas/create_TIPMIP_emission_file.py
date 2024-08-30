@@ -33,10 +33,14 @@ daye = np.cumsum(dayim)
 # calculate emissions based on TCRE (Arora et al., 2020)
 TCRE = 1.32 #°C EgC-1
 E = 1000 * 0.02 / TCRE #GtC yr-1
-Edata =  np.ones((nmonth, 1)) * E
+Edata =  np.ones((nmonth, 1)) * E 
 
 # (assumed) midpoint of each month in the format MMDD
 date_mint = [116, 215, 316, 416, 516, 616, 716, 816, 916, 1016, 1116, 1216]
+
+# Set emissions constant over each month or not
+constant_em = True
+
 for iy in range(1, nyears + 1):
     for im in range(1, 13):
         idx = (iy - 1) * 12 + im - 1
@@ -47,10 +51,14 @@ for iy in range(1, nyears + 1):
         
         # Spatially, emissions are distributed evenly over the sphere and months
         if start_year <= iy < start_year + nyears:
-            # unit correction - time
-            dt = (time_bnds[1, idx] - time_bnds[0, idx]) * 86400.0
-            # unit correction - Gt C to kg CO2
-            co2flx[idx, :, :] = Edata[idx] * 1e12 * 3.664 / dt / totarea / 12
+            if constant_em == True:
+                # unit correction - Gt C yr-1 to kg CO2 s-1
+                co2flx[idx, :, :] = Edata[idx] * 1e12 * 3.664 / totarea / 86400.0 / 365.0
+	    else:
+                # unit correction sec month-1
+                dt = (time_bnds[1, idx] - time_bnds[0, idx]) * 86400.0
+                # unit correction - Gt C month-1 to kg CO2 s-1
+                co2flx[idx, :, :] = Edata[idx] * 1e12 * 3.664 / dt / totarea / 12
         else:
             co2flx[idx, :, :] = 0.0
 
@@ -76,7 +84,7 @@ encoding = {
 }
 
 #write netcdf
-dataset.to_netcdf('/mnt/bgcdata-ns2980k/ffr043/TipESM/data/emissions-ESM-tipmip_CO2_anthro_surface_185001-209912_fv_1.9x2.5_c20240803.nc', mode="w", format="NETCDF3_64BIT", encoding=encoding, unlimited_dims='time')
+dataset.to_netcdf('/mnt/bgcdata-ns2980k/ffr043/TipESM/data/emissions-ESM-tipmip_CO2_anthro_surface_185001-209912_fv_1.9x2.5_c20240823_cE.nc', mode="w", format="NETCDF3_64BIT", encoding=encoding, unlimited_dims='time')
 
 
 
